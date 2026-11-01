@@ -730,7 +730,8 @@
     function extractDocDate(doc) {
         if (!doc) return '';
         let d = doc.scan_date || doc.date || doc.posting_date || doc.creation || '';
-        return d.includes(' ') ? d.split(' ')[0] : d;
+        if (!d) return '';
+        return d.toString().trim().split(' ')[0];
     }
 
     function setDatePreset(mode) {
@@ -744,7 +745,7 @@
         const container = document.getElementById('entriesContainer');
         try {
             const filters = JSON.stringify([["docstatus", "=", 1]]);
-            const url = `${CONFIG.serverUrl}/api/resource/Employee Scan Entry?filters=${encodeURIComponent(filters)}&limit_page_length=2000&order_by=scan_date asc`;
+            const url = `${CONFIG.serverUrl}/api/resource/Employee Scan Entry?filters=${encodeURIComponent(filters)}&limit_page_length=500&order_by=scan_date desc`;
             const res = await fetch(url, { headers: { "Authorization": `token ${CONFIG.apiKey}:${CONFIG.apiSecret}` } });
             const listData = await res.json();
             const docsList = listData.data || [];
@@ -769,7 +770,6 @@
         let totalScanned = 0;
         let empTotals = {};
 
-        // تجميع الكميات لكل موظف خلال الفترة المحددة بالكامل
         docs.forEach(doc => {
             const scans = doc.employee_scans || [];
             scans.forEach(row => {
@@ -791,7 +791,6 @@
             return;
         }
 
-        // بناء بطاقة ملخص أداء الموظفين للفترة
         const card = document.createElement('div');
         card.className = 'doc-card';
         
@@ -907,48 +906,35 @@
                 const filters = JSON.stringify([["docstatus", "=", 1]]);
                 const fields = JSON.stringify(["name", "transaction_date", "schedule_date", "set_warehouse", "docstatus"]);
                 const url = `${CONFIG.serverUrl}/api/resource/Material Request?filters=${encodeURIComponent(filters)}&fields=${encodeURIComponent(fields)}&limit_start=${start}&limit_page_length=${pageLimit}&order_by=transaction_date desc`;
-
+                
                 const res = await fetch(url, { headers: { "Authorization": `token ${CONFIG.apiKey}:${CONFIG.apiSecret}` } });
-                const data = await res.json();
-                const list = data.data || [];
-                allRawList = allRawList.concat(list);
-                fetchedCount = list.length;
+                const listData = await res.json();
+                const docsList = listData.data || [];
+                allRawList = allRawList.concat(docsList);
+                fetchedCount = docsList.length;
                 start += pageLimit;
             }
 
-            cacheMRDocs = [];
-            const batchSize = 30;
+            cacheMRDocs = await Promise.all(allRawList.map(async (doc) => {
+                const resDoc = await fetch(`${CONFIG.serverUrl}/api/resource/Material Request/${encodeURIComponent(doc.name)}`, {
+                    headers: { "Authorization": `token ${CONFIG.apiKey}:${CONFIG.apiSecret}` }
+                });
+                return resDoc.ok ? (await resDoc.json()).data : null;
+            }));
 
-            for (let i = 0; i < allRawList.length; i += batchSize) {
-                const batch = allRawList.slice(i, i + batchSize);
-                await Promise.all(batch.map(async (item) => {
-                    try {
-                        const resDoc = await fetch(`${CONFIG.serverUrl}/api/resource/Material Request/${encodeURIComponent(item.name)}`, {
-                            headers: { "Authorization": `token ${CONFIG.apiKey}:${CONFIG.apiSecret}` }
-                        });
-                        if (resDoc.ok) {
-                            const doc = (await resDoc.json()).data;
-                            if (doc && doc.items) {
-                                const mainItems = doc.items.filter(it => (it.from_warehouse || doc.set_from_warehouse || '').toLowerCase().includes('main'));
-                                if (mainItems.length > 0 || (doc.set_from_warehouse && doc.set_from_warehouse.toLowerCase().includes('main'))) {
-                                    cacheMRDocs.push(doc);
-                                }
-                            }
-                        }
-                    } catch (e) {}
-                }));
-            }
-
+            cacheMRDocs = cacheMRDocs.filter(d => d !== null);
             filterMRData();
         } catch (err) {
-            listContainer.innerHTML = `<div style="text-align:center; color:red; font-size:11px; font-weight:700;">فشل جلب البيانات من السيرفر</div>`;
+            listContainer.innerHTML = `<div style="text-align:center; color:red; font-size:11px;">خطأ بجلب بيانات الفروع</div>`;
         }
     }
 
     function setMRDatePreset(mode, btnEl) {
         mrDateFilterMode = mode;
-        btnEl.closest('.modal-body').querySelectorAll('.period-chips .chip').forEach(b => b.classList.remove('active'));
-        btnEl.classList.add('active');
+        if (btnEl && btnEl.parentNode) {
+            btnEl.parentNode.querySelectorAll('.chip').forEach(b => b.classList.remove('active'));
+            btnEl.classList.add('active');
+        }
         filterMRData();
     }
 
@@ -956,84 +942,88 @@
         const today = new Date();
         const todayISO = formatDateISO(today);
 
-        let totalSum = 0, transSum = 0, pendSum = 0;
-        let branchTotals = {};
+        const filteredDocs = cacheMRDocs.filter(doc => {
+            const d = doc.transaction_date || doc.schedule_date || '';
+            const docDate = d.toString().trim().split(' ')[0];
+            if (!docDate) return false;
 
-        cacheMRDocs.sort((a, b) => new Date(extractDocDate(b)) - new Date(extractDocDate(a)));
-
-        cacheMRDocs.forEach(doc => {
-            const tDate = doc.transaction_date || extractDocDate(doc);
-            let dateMatch = true;
-
-            if (mrDateFilterMode === 'today') dateMatch = (tDate === todayISO);
-            else if (mrDateFilterMode === 'yesterday') {
+            if (mrDateFilterMode === 'today') return docDate === todayISO;
+            if (mrDateFilterMode === 'yesterday') {
                 const yest = new Date(); yest.setDate(today.getDate() - 1);
-                dateMatch = (tDate === formatDateISO(yest));
-            } else if (mrDateFilterMode === 'week') {
-                const sevenDays = new Date(); sevenDays.setDate(today.getDate() - 7);
-                dateMatch = (tDate >= formatDateISO(sevenDays) && tDate <= todayISO);
-            } else if (mrDateFilterMode === 'month') {
-                dateMatch = tDate.startsWith(`${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`);
+                return docDate === formatDateISO(yest);
             }
+            if (mrDateFilterMode === 'week') {
+                const sevenDays = new Date(); sevenDays.setDate(today.getDate() - 7);
+                return (docDate >= formatDateISO(sevenDays) && docDate <= todayISO);
+            }
+            if (mrDateFilterMode === 'month') {
+                return docDate.startsWith(`${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`);
+            }
+            return true;
+        });
 
-            if (!dateMatch) return;
+        renderMRSummary(filteredDocs);
+    }
 
-            const docTarget = doc.set_warehouse || (doc.items && doc.items[0] && doc.items[0].warehouse) || 'فرع غير محدد';
+    function renderMRSummary(docs) {
+        let totalReq = 0, totalTrans = 0, totalPend = 0;
+        let branchMap = {};
 
-            if (!branchTotals[docTarget]) {
-                branchTotals[docTarget] = { qty: 0, trans: 0, pend: 0 };
+        docs.forEach(doc => {
+            const branch = doc.set_warehouse || 'المستودع الرئيسي';
+            if (!branchMap[branch]) {
+                branchMap[branch] = { required: 0, transferred: 0, pending: 0 };
             }
 
             (doc.items || []).forEach(item => {
-                const q = Number(item.qty || 0);
-                const t = Number(item.ordered_qty || item.transferred_qty || 0);
-                const p = Math.max(0, q - t);
+                const req = Number(item.qty || 0);
+                const trans = Number(item.transferred_qty || item.delivered_qty || 0);
+                const pend = Math.max(0, req - trans);
 
-                branchTotals[docTarget].qty += q;
-                branchTotals[docTarget].trans += t;
-                branchTotals[docTarget].pend += p;
+                totalReq += req;
+                totalTrans += trans;
+                totalPend += pend;
 
-                totalSum += q;
-                transSum += t;
-                pendSum += p;
+                branchMap[branch].required += req;
+                branchMap[branch].transferred += trans;
+                branchMap[branch].pending += pend;
             });
         });
 
-        document.getElementById('mrTotalQty').textContent = totalSum.toLocaleString('en-US');
-        document.getElementById('mrTransferredQty').textContent = transSum.toLocaleString('en-US');
-        document.getElementById('mrPendingQty').textContent = pendSum.toLocaleString('en-US');
+        document.getElementById('mrTotalQty').textContent = totalReq.toLocaleString('en-US');
+        document.getElementById('mrTransferredQty').textContent = totalTrans.toLocaleString('en-US');
+        document.getElementById('mrPendingQty').textContent = totalPend.toLocaleString('en-US');
 
         const listContainer = document.getElementById('branchSummaryList');
         listContainer.innerHTML = '';
 
-        const branchNames = Object.keys(branchTotals);
-
-        if (branchNames.length === 0) {
-            listContainer.innerHTML = `<div style="text-align:center; padding:20px; color:var(--text-muted); font-size:11px; font-weight:700;">${translations[currentLang]?.no_mr || 'لا توجد طلبات مواد بالفترات المحددة.'}</div>`;
+        const branches = Object.keys(branchMap);
+        if (branches.length === 0) {
+            listContainer.innerHTML = `<div style="text-align:center; padding:15px; font-size:11px; color:var(--text-muted); font-weight:700;">${translations[currentLang]?.no_mr || 'لا توجد طلبات مواد.'}</div>`;
             return;
         }
 
-        branchNames.sort((a,b) => branchTotals[b].qty - branchTotals[a].qty).forEach(branchName => {
-            const data = branchTotals[branchName];
+        branches.forEach(branch => {
+            const bData = branchMap[branch];
             const card = document.createElement('div');
             card.className = 'branch-summary-card';
             card.innerHTML = `
                 <div class="branch-card-title">
-                    <i class="fa-solid fa-store"></i>
-                    <span>${branchName}</span>
+                    <i class="fa-solid fa-warehouse" style="color:var(--accent);"></i>
+                    <span>${branch}</span>
                 </div>
                 <div class="branch-values-grid">
                     <div class="branch-val-box">
-                        <span data-i18n="card_required">${translations[currentLang]?.card_required || 'المطلوب'}</span>
-                        <strong style="color:var(--danger);">${data.qty.toLocaleString('en-US')}</strong>
+                        <span data-i18n="card_required">المطلوب</span>
+                        <strong style="color:var(--danger);">${bData.required.toLocaleString('en-US')}</strong>
                     </div>
                     <div class="branch-val-box">
-                        <span data-i18n="card_transferred">${translations[currentLang]?.card_transferred || 'المحول'}</span>
-                        <strong style="color:var(--success);">${data.trans.toLocaleString('en-US')}</strong>
+                        <span data-i18n="card_transferred">المحول</span>
+                        <strong style="color:var(--success);">${bData.transferred.toLocaleString('en-US')}</strong>
                     </div>
                     <div class="branch-val-box">
-                        <span data-i18n="card_pending">${translations[currentLang]?.card_pending || 'المتبقي'}</span>
-                        <strong style="color:var(--warning);">${data.pend.toLocaleString('en-US')}</strong>
+                        <span data-i18n="card_pending">المتبقي</span>
+                        <strong style="color:var(--warning);">${bData.pending.toLocaleString('en-US')}</strong>
                     </div>
                 </div>
             `;
